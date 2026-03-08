@@ -72,6 +72,7 @@ class PathReplanner:
         now        = time.time()
         time_since = now - self._last_replan_time
 
+        # Guard: don't replan while executing previous bypass
         if self._active_bypass_wp2 is not None:
             bx, by      = self._active_bypass_wp2
             dist_to_wp2 = np.sqrt((robot_x - bx)**2 + (robot_y - by)**2)
@@ -108,10 +109,14 @@ class PathReplanner:
         ]))
         orig_path_dir = self._path_direction(original_trajectory, closest_orig_idx)
 
+        # Shift scan-detected near face to approximate obstacle centre
+        obs_cx = obs_x + orig_path_dir[0] * 0.30
+        obs_cy = obs_y + orig_path_dir[1] * 0.30
+
         side   = self._choose_side(robot_x, robot_y, robot_theta)
         bypass = self._bypass_waypoints(
             original_trajectory, closest_orig_idx,
-            obs_x, obs_y, side,
+            obs_cx, obs_cy, side,
             robot_x, robot_y
         )
         if bypass is None:
@@ -121,7 +126,7 @@ class PathReplanner:
         resume_idx = self._find_resume_idx(
             original_trajectory, closest_orig_idx,
             bypass[-1], orig_path_dir,
-            obs_x, obs_y
+            obs_cx, obs_cy
         )
 
         path_after = [(t[0], t[1]) for t in original_trajectory[resume_idx:]]
@@ -242,6 +247,7 @@ class PathReplanner:
         return 'left' if left_mean > right_mean else 'right'
 
     def _cast_ray(self, ox, oy, dx, dy, max_dist=2.0) -> float:
+        """Distance to nearest obstacle along direction (dx,dy) from (ox,oy)."""
         if self.latest_scan is None or self._last_scan_pose is None:
             return max_dist
         rx, ry, rth = self._last_scan_pose
@@ -261,26 +267,6 @@ class PathReplanner:
                 min_dist = min(min_dist, along)
         return min_dist
 
-    def _path_segment_is_free(self, p1, p2) -> bool:
-        """
-        Check the ENTIRE line segment p1→p2 is clear of scan obstacles.
-        Uses robot half-width + margin as clearance radius.
-        """
-        if self.latest_scan is None or self._last_scan_pose is None:
-            return True
-        clearance   = self.robot_width / 2.0 + 0.15   # 0.35m
-        rx, ry, rth = self._last_scan_pose
-        scan        = self.latest_scan
-        for i, r in enumerate(scan.ranges):
-            if not np.isfinite(r) or r < scan.range_min or r > scan.range_max:
-                continue
-            angle = scan.angle_min + i * scan.angle_increment
-            wx = rx + r * np.cos(rth + angle)
-            wy = ry + r * np.sin(rth + angle)
-            if self._pt_to_seg_dist(wx, wy, p1[0], p1[1], p2[0], p2[1]) < clearance:
-                return False
-        return True
-
     def _point_is_free(self, point, check_radius: float = 0.25) -> bool:
         if self.latest_scan is None or self._last_scan_pose is None:
             return True
@@ -297,9 +283,30 @@ class PathReplanner:
                 return False
         return True
 
+    def _path_segment_is_free(self, p1, p2) -> bool:
+        """Check the segment p1→p2 is clear of obstacles with robot half-width clearance."""
+        if self.latest_scan is None or self._last_scan_pose is None:
+            return True
+        clearance   = self.robot_width / 2.0 + 0.15
+        rx, ry, rth = self._last_scan_pose
+        scan        = self.latest_scan
+        for i, r in enumerate(scan.ranges):
+            if not np.isfinite(r) or r < scan.range_min or r > scan.range_max:
+                continue
+            angle = scan.angle_min + i * scan.angle_increment
+            wx = rx + r * np.cos(rth + angle)
+            wy = ry + r * np.sin(rth + angle)
+            if self._pt_to_seg_dist(wx, wy, p1[0], p1[1], p2[0], p2[1]) < clearance:
+                return False
+        return True
+
     def _bypass_waypoints(self, trajectory, current_idx,
                            obs_x, obs_y, side,
                            robot_x, robot_y) -> list:
+        """
+        Returns [wp1, wp2] whose arc wp1→wp2 is clear, or None if both sides blocked.
+        obs_x/obs_y should already be the shifted obstacle centre.
+        """
         path_dir = self._path_direction(trajectory, current_idx)
 
         for attempt_side in [side, ('right' if side == 'left' else 'left')]:
@@ -308,18 +315,16 @@ class PathReplanner:
                 perp = -perp
 
             free_dist = self._cast_ray(obs_x, obs_y, perp[0], perp[1], max_dist=2.0)
-            m = float(np.clip(free_dist * 0.55, 0.40, 0.75))
+            m = float(np.clip(free_dist * 0.55, 0.45, 0.75))
 
-            wp1 = (obs_x + perp[0]*m - path_dir[0]*m*0.6,
-                   obs_y + perp[1]*m - path_dir[1]*m*0.6)
-            wp2 = (obs_x + perp[0]*m + path_dir[0]*m*0.6,
-                   obs_y + perp[1]*m + path_dir[1]*m*0.6)
+            # wp1: 0.8m before obstacle centre, wp2: 1.2m past it
+            wp1 = (obs_x + perp[0]*m - path_dir[0]*m*0.8,
+                   obs_y + perp[1]*m - path_dir[1]*m*0.8)
+            wp2 = (obs_x + perp[0]*m + path_dir[0]*m*1.2,
+                   obs_y + perp[1]*m + path_dir[1]*m*1.2)
 
-            # Only check the bypass arc wp1→wp2, NOT robot→wp1
-            # robot→wp1 will always clip the obstacle — that's expected
-            seg_ok = self._path_segment_is_free(wp1, wp2)
-
-            if seg_ok:
+            # Only check the bypass arc wp1→wp2 for clearance
+            if self._path_segment_is_free(wp1, wp2):
                 if attempt_side != side:
                     logger.info(
                         f'↩️  Side flipped to {attempt_side} | '
