@@ -13,10 +13,11 @@ from turtlebot4_msgs.action import FollowTrajectory
 from trajectory_tracking.path_smoother import smooth_path
 from trajectory_tracking.trajectory_generator import generate_trajectory
 from trajectory_tracking.pure_pursuit import PurePursuit
-from trajectory_tracking.gap_avoider import GapAvoider
+from trajectory_tracking.path_replanner import PathReplanner
 
 
 class FollowTrajectoryActionServer(Node):
+
     def __init__(self):
         super().__init__('follow_trajectory_server')
 
@@ -24,7 +25,7 @@ class FollowTrajectoryActionServer(Node):
         self.declare_parameter('max_vel',         0.3)
         self.declare_parameter('lookahead',       0.5)
         self.declare_parameter('control_rate',   20.0)
-        self.declare_parameter('goal_tolerance',  0.15)
+        self.declare_parameter('goal_tolerance',  0.25)  # ← fixed
 
         self.cb_group = ReentrantCallbackGroup()
 
@@ -39,27 +40,28 @@ class FollowTrajectoryActionServer(Node):
         )
 
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.odom_sub = self.create_subscription(
+        self.odom_sub    = self.create_subscription(
             Odometry, '/odom', self.odom_callback, 10,
             callback_group=self.cb_group
         )
-        self.scan_sub = self.create_subscription(
+        self.scan_sub    = self.create_subscription(
             LaserScan, '/scan', self.scan_callback, 10,
             callback_group=self.cb_group
         )
 
-        self.avoider = GapAvoider(
-            robot_width=0.40,
-            stop_distance=0.35,
-            safe_distance=1.2,
-            scan_arc_deg=180.0,
-            gap_gain=2.0,
+        self.replanner = PathReplanner(
+            robot_width        = 0.40,
+            corridor_width     = 0.80,
+            lookahead_check    = 3.0,
+            obstacle_margin    = 0.65,
+            replan_cooldown    = 1.5,
+            stop_distance      = 0.45,
+            stop_arc_deg       = 60.0,
+            min_move_to_replan = 0.05,
         )
 
         self.robot_pose = None
         self.get_logger().info('✅ Follow Trajectory Action Server ready')
-
-    # ─── Callbacks ────────────────────────────────────────────────
 
     def goal_callback(self, goal_request):
         if len(goal_request.waypoints) < 2:
@@ -80,9 +82,7 @@ class FollowTrajectoryActionServer(Node):
         self.robot_pose = (pos.x, pos.y, 2.0 * np.arctan2(ori.z, ori.w))
 
     def scan_callback(self, msg: LaserScan):
-        self.avoider.update_scan(msg)
-
-    # ─── Execution ────────────────────────────────────────────────
+        self.replanner.update_scan(msg, self.robot_pose)
 
     def execute_callback(self, goal_handle):
         self.get_logger().info('Executing goal...')
@@ -95,11 +95,9 @@ class FollowTrajectoryActionServer(Node):
 
         feedback_msg = FollowTrajectory.Feedback()
 
-        # Wait for odom
-        timeout = time.time() + 5.0
-        while self.robot_pose is None and time.time() < timeout:
+        deadline = time.time() + 5.0
+        while self.robot_pose is None and time.time() < deadline:
             time.sleep(0.05)
-
         if self.robot_pose is None:
             self.get_logger().error('❌ No odom — aborting')
             goal_handle.abort()
@@ -111,11 +109,11 @@ class FollowTrajectoryActionServer(Node):
             f'θ={np.degrees(self.robot_pose[2]):.1f}°'
         )
 
-        # Build trajectory
-        waypoints  = [(wp.x, wp.y) for wp in goal_handle.request.waypoints]
-        smoothed   = smooth_path(waypoints, num_points=200)
-        trajectory = generate_trajectory(smoothed, total_time, max_vel)
-        final_goal = trajectory[-1][:2]
+        waypoints           = [(wp.x, wp.y) for wp in goal_handle.request.waypoints]
+        smoothed            = smooth_path(waypoints, num_points=200)
+        original_trajectory = generate_trajectory(smoothed, total_time, max_vel)
+        trajectory          = original_trajectory
+        final_goal          = original_trajectory[-1][:2]
 
         pp = PurePursuit(lookahead=lookahead, max_lin_vel=max_vel)
         pp.set_trajectory(trajectory)
@@ -123,32 +121,59 @@ class FollowTrajectoryActionServer(Node):
         start_time     = time.time()
         control_period = 1.0 / rate_hz
         result         = FollowTrajectory.Result()
+        _estop_logged  = False
 
         while rclpy.ok():
 
-            # ── Cancel ────────────────────────────────────────────
             if goal_handle.is_cancel_requested:
                 self.get_logger().info('Cancelled')
-                self._stop()
+                self.cmd_vel_pub.publish(Twist())
                 goal_handle.canceled()
                 result.success        = False
                 result.final_error    = 0.0
                 result.execution_time = float(time.time() - start_time)
                 return result
 
-            # ── Control ───────────────────────────────────────────
-            pp_cmd   = pp.compute_cmd(*self.robot_pose)
-            safe_cmd = self.avoider.modify_cmd(pp_cmd)
-            self.cmd_vel_pub.publish(safe_cmd)
+            elapsed        = time.time() - start_time
+            remaining_time = max(total_time - elapsed, 5.0)
 
-            # ── Feedback ──────────────────────────────────────────
-            elapsed      = time.time() - start_time
+            if self.replanner.emergency_stop_needed():
+                self.cmd_vel_pub.publish(Twist())
+                if not _estop_logged:
+                    self.get_logger().warn('🛑 Emergency stop — obstacle too close')
+                    _estop_logged = True
+                time.sleep(control_period)
+                continue
+
+            _estop_logged = False
+
+            trajectory, pp_start_idx, did_replan = self.replanner.replan(
+                trajectory,
+                original_trajectory,
+                pp._current_idx,
+                self.robot_pose[0],
+                self.robot_pose[1],
+                self.robot_pose[2],
+                total_time,
+                max_vel,
+                remaining_time,
+            )
+            if did_replan:
+                pp.set_trajectory(trajectory)
+                pp._current_idx = pp_start_idx
+                self.get_logger().info(
+                    f'PP restarted at idx={pp_start_idx}/{len(trajectory)}'
+                )
+
+            cmd = pp.compute_cmd(*self.robot_pose)
+            self.cmd_vel_pub.publish(cmd)
+
             dist_to_goal = float(np.linalg.norm(
                 np.array(final_goal) - np.array(self.robot_pose[:2])
             ))
-            progress = float(np.clip((elapsed / total_time) * 100.0, 0.0, 100.0))
-
-            feedback_msg.progress_pct = progress
+            feedback_msg.progress_pct = float(
+                np.clip((elapsed / total_time) * 100.0, 0.0, 100.0)
+            )
             feedback_msg.status = String(data=(
                 f'dist={dist_to_goal:.2f}m | '
                 f'idx={pp._current_idx}/{len(trajectory)} | '
@@ -156,24 +181,23 @@ class FollowTrajectoryActionServer(Node):
             ))
             goal_handle.publish_feedback(feedback_msg)
 
-            # ── Goal reached ──────────────────────────────────────
-            path_done = pp._current_idx >= len(trajectory) - 1
-            if dist_to_goal < tolerance and path_done:
+            if dist_to_goal < tolerance:
+                self.get_logger().info(f'✅ Goal reached! error={dist_to_goal:.3f}m')
+                break
+
+            if pp._current_idx >= len(trajectory) - 3 and dist_to_goal < tolerance * 3:
                 self.get_logger().info(
-                    f'✅ Goal reached! error={dist_to_goal:.3f}m'
+                    f'✅ Close enough at path end: error={dist_to_goal:.3f}m'
                 )
                 break
 
-            # ── Timeout ───────────────────────────────────────────
             if elapsed > total_time:
-                self.get_logger().warn(
-                    f'⚠️ Timeout | dist_to_goal={dist_to_goal:.2f}m'
-                )
+                self.get_logger().warn(f'⚠️  Timeout | dist_to_goal={dist_to_goal:.2f}m')
                 break
 
             time.sleep(control_period)
 
-        self._stop()
+        self.cmd_vel_pub.publish(Twist())
         elapsed      = time.time() - start_time
         dist_to_goal = float(np.linalg.norm(
             np.array(final_goal) - np.array(self.robot_pose[:2])
@@ -188,10 +212,6 @@ class FollowTrajectoryActionServer(Node):
             f'time={elapsed:.1f}s'
         )
         return result
-
-    def _stop(self):
-        self.cmd_vel_pub.publish(Twist())
-        self.get_logger().info('Robot stopped')
 
 
 def main(args=None):
