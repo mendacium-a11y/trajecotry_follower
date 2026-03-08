@@ -25,4 +25,4 @@ setup(
             'follow_trajectory_server = trajectory_tracking.follow_trajectory_action_server:main',
         ],
     },
-)  
+)

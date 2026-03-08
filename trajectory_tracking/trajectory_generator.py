@@ -1,3 +1,10 @@
+"""
+trajectory_generator.py
+Converts a smooth 2D path into a time-parameterized trajectory using a
+trapezoidal velocity profile (accelerate -> cruise -> decelerate).
+Outputs [(x, y, t), ...] suitable for use with the Pure Pursuit controller.
+"""
+
 import numpy as np
 from typing import List, Tuple
 
@@ -7,6 +14,9 @@ def generate_trajectory(
     max_vel: float = 0.3,
     accel: float = 0.5
 ) -> List[Tuple[float, float, float]]:
+
+    if len(smoothed_path) < 2:
+        raise ValueError(f'smooth_path must have ≥ 2 points, got {len(smoothed_path)}')
 
     pts = np.array(smoothed_path)
     diffs = np.diff(pts, axis=0)
@@ -27,7 +37,7 @@ def generate_trajectory(
     dist_cruise = total_dist - 2 * dist_accel
     t_cruise = dist_cruise / max_vel
 
-    # FIX: actually map distances to times using trapezoid
+    # Actually map distances to times using trapezoidal velocity profile
     def dist_to_time(d):
         if d <= dist_accel:
             return np.sqrt(2 * d / accel)

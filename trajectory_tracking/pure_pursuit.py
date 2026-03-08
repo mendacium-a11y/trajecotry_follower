@@ -1,3 +1,10 @@
+"""
+pure_pursuit.py
+Implements the Pure Pursuit controller for a differential-drive robot.
+Computes linear and angular velocity commands by finding a lookahead point
+on the trajectory ahead of the robot and steering toward it.
+"""
+
 import numpy as np
 from geometry_msgs.msg import Twist
 from typing import List, Tuple
@@ -8,7 +15,7 @@ class PurePursuit:
         self.max_lin_vel = max_lin_vel
         self.max_ang_vel = max_ang_vel
         self.trajectory = []
-        self._current_idx = 0  # FIX: track progress along path
+        self._current_idx = 0  # Trajectory progress index
 
     def set_trajectory(self, traj: List[Tuple[float, float, float]]):
         self.trajectory = traj
@@ -36,11 +43,11 @@ class PurePursuit:
                 lookahead_idx = i
                 break
 
-        # FIX: if no lookahead point found, drive directly to final point
+        # If no lookahead point found, drive directly to final point
         if lookahead_idx is None:
             lx, ly, _ = self.trajectory[-1]
             dist_to_final = np.sqrt((robot_x - lx)**2 + (robot_y - ly)**2)
-            if dist_to_final < 0.05:   # Very close → full stop
+            if dist_to_final < 0.05:   # Very close, perform full stop
                 return Twist()
             # Drive straight toward final point at reduced speed
             alpha = np.arctan2(ly - robot_y, lx - robot_x) - robot_theta
