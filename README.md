@@ -1,6 +1,6 @@
 # Trajectory Tracking & Path Smoothing for Differential Drive Robots
 
-This repository contains a ROS 2 package implementing a Path Smoothing and Trajectory Tracking action server for a differential drive robot (TurtleBot 4). It accepts discrete 2D waypoints, generates a smooth time-parameterized trajectory avoiding sudden sharp turns, and tracks it using a Pure Pursuit controller. It also features a geometric path replanner for dynamic obstacle avoidance.
+This repository contains a ROS 2 package implementing a Path Smoothing and Trajectory Tracking action server for a differential drive robot (TurtleBot 4). It accepts discrete 2D waypoints, generates a smooth time-parameterized trajectory avoiding sudden sharp turns, and tracks it using a Pure Pursuit controller. It also features a geometric path replanner for dynamic obstacle avoidance(needs some work).
 
 ## Table of Contents
 1. [Setup and Execution](#setup-and-execution)
@@ -15,7 +15,7 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
 
 ### Prerequisites
 - ROS 2 Humble
-- `turtlebot4_simulator` and `turtlebot4_desktop` packages
+- `turtlebot4_simulator` package
 - Python 3 with `numpy` and `scipy`
 
 ### Installation
@@ -68,7 +68,6 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
    - `/input_waypoints` — `visualization_msgs/MarkerArray` (green=start, red=goal, cyan=intermediate)
    - `/trajectory_path` — `nav_msgs/Path` (original planned path)
    - `/replanned_trajectory` — `nav_msgs/Path` (appears when bypassing an obstacle)
-   - `/scan` — `sensor_msgs/LaserScan` (live lidar)
 
 ### Running Tests
 ```bash
@@ -132,7 +131,7 @@ Transitioning from TurtleBot 4 simulation to a physical differential-drive robot
 
 ---
 
-## Extra Credit: Obstacle Avoidance
+## Additional Implementation: Obstacle Avoidance
 
 The system dynamically bypasses unexpected obstacles at runtime using a geometric local planner in `path_replanner.py`.
 
@@ -208,7 +207,7 @@ Watch `/replanned_trajectory` appear in RViz as the robot detects the box and co
 
 This project used AI tooling throughout development:
 
-- **Perplexity / Claude:** Used to design the state machine architecture for the replanner after diagnosing that the original cooldown-timer approach was causing mid-bypass re-triggering and oscillation. Also used to debug the spline oscillation issue — identified that `s=0.0` in `splprep` causes Runge-style overshoot when bypass waypoints are densely clustered, and suggested the adaptive `s = n * 0.01` fix.
-- **GitHub Copilot:** Assisted with ROS 2 boilerplate (publisher/subscriber setup, action server scaffolding) and Python type hints.
+- **Perplexity (Claude Sonnet 4.6):** Used for implementation guidance throughout the project — designing the state machine architecture for the replanner after diagnosing that the original cooldown-timer approach was causing mid-bypass re-triggering and oscillation, debugging the spline oscillation issue caused by `s=0.0` in `splprep` when bypass waypoints are densely clustered, and identifying the adaptive `s = n * 0.01` fix. Also used for ROS 2 architecture decisions, bug diagnosis across the full pipeline, and test case design.
+- **Google Antigravity (AI-assisted coding):** Used for inline code generation, ROS 2 boilerplate scaffolding (publisher/subscriber setup, action server structure), and Python type hints.
 
-All algorithmic decisions — choice of Pure Pursuit over PID, trapezoidal profiling, B-Spline smoothing, geometric bypass approach — were made and understood by the developer. AI was used as a debugging and implementation accelerator, not a decision-maker.
+All algorithmic decisions — choice of Pure Pursuit over PID, trapezoidal profiling, B-Spline smoothing, geometric bypass approach — were made and understood by me. AI was used as a debugging and implementation accelerator, not a decision-maker.
