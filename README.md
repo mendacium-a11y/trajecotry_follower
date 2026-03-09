@@ -1,12 +1,12 @@
 # Trajectory Tracking & Path Smoothing for Differential Drive Robots
 
-This repository contains a ROS 2 package implementing a Path Smoothing and Trajectory Tracking action server for a differential drive robot (TurtleBot 4). It accepts discrete 2D waypoints, generates a smooth time-parameterized trajectory avoiding sudden sharp turns, and tracks it using a Pure Pursuit controller. It also features a geometric path replanner for dynamic obstacle avoidance(needs some work).
+This repository contains a ROS 2 package implementing a Path Smoothing and Trajectory Tracking action server for a differential drive robot (TurtleBot 4). It accepts discrete 2D waypoints, generates a smooth time-parameterized trajectory avoiding sudden sharp turns, and tracks it using a Pure Pursuit controller. 
 
 ## Table of Contents
 1. [Setup and Execution](#setup-and-execution)
 2. [Design Choices and Architecture](#design-choices-and-architecture)
 3. [Extending to a Real Robot](#extending-to-a-real-robot)
-4. [Extra Credit: Obstacle Avoidance](#extra-credit-obstacle-avoidance)
+4. [Additional Implementation: Obstacle Avoidance](#additional-implementation-obstacle-avoidance)
 5. [AI Tools Used](#ai-tools-used)
 
 ---

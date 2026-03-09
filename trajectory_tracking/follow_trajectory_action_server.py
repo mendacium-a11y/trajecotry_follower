@@ -224,7 +224,7 @@ class FollowTrajectoryActionServer(Node):
             remaining_time = max(total_time - elapsed, 5.0)
 
             # Capture snapshot once, e-stop and replan use identical data
-            snap = self.replanner._snapshot
+            snap = self.replanner.get_snapshot()
 
             # ── Emergency stop - does NOT skip replan ──────────────────────
             if self.replanner.emergency_stop_needed(snap):

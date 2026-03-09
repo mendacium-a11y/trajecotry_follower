@@ -293,6 +293,10 @@ class PathReplanner:
             self._bypass_wp2 = None
             return None
 
+    def get_snapshot(self):
+        return self._snapshot
+
+
     # ── Internal: geometry ─────────────────────────────────────────────────
 
     @staticmethod
