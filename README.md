@@ -113,7 +113,7 @@ The code is broken into specific Python modules that don't depend on ROS, making
 - **Why:** Pure pursuit steers by chasing a spatial point ahead of the robot. This handles odometry drift well — if the robot gets delayed, it just looks further down the curve instead of winding up a PID integral error. But to make sure it obeys our trapezoidal plan, the linear velocity is now read directly from the timestamps of the current path segment.
 - **Lookahead:** Currently set to `0.5m`. Shorter means tighter tracking but more wobbling; longer is smoother but cuts corners.
 - **Stopping:** When the lookahead point runs off the end of the path, it steers straight for the goal and dials down the speed proportionally to the remaining distance.
-
+![velocity_plot](image.png)
 ### 4. Action Server Architecture (`follow_trajectory_action_server.py`)
 - **Setup:** A ROS 2 Action Server allows sending large waypoint arrays, tracking progress percentages, and cancelling goals properly.
 - **Concurrency:** Uses `MultiThreadedExecutor`. This prevents the 20Hz control loop from getting blocked by `/odom` or `/scan` callbacks.
