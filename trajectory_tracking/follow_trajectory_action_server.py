@@ -13,7 +13,7 @@ Architecture:
 
 import rclpy
 import numpy as np
-import time
+import time, threading
 from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -81,6 +81,7 @@ class FollowTrajectoryActionServer(Node):
         )
 
         self.robot_pose = None
+        self._pose_lock = threading.Lock()
         self.get_logger().info('Follow Trajectory Action Server ready')
 
     # ── Visualization helpers ──────────────────────────────────────────────
@@ -155,12 +156,16 @@ class FollowTrajectoryActionServer(Node):
     def odom_callback(self, msg):
         pos = msg.pose.pose.position
         ori = msg.pose.pose.orientation
-        self.robot_pose = (pos.x, pos.y, 2.0 * np.arctan2(ori.z, ori.w))
+        with self._pose_lock:
+            self.robot_pose = (pos.x, pos.y, 2.0 * np.arctan2(ori.z, ori.w))
 
     def scan_callback(self, msg: LaserScan):
         # Guard: scan can arrive before first odometry, pose would be None
-        if self.robot_pose is not None:
-            self.replanner.update_scan(msg, self.robot_pose)
+        with self._pose_lock:
+            pose = self.robot_pose
+
+        if pose is not None:
+            self.replanner.update_scan(msg, pose)
 
     # ── Execution loop ─────────────────────────────────────────────────────
 
@@ -178,17 +183,20 @@ class FollowTrajectoryActionServer(Node):
 
         # Wait up to 5s for first odometry
         deadline = time.time() + 5.0
-        while self.robot_pose is None and time.time() < deadline:
+        while time.time() < deadline:
+            with self._pose_lock:
+                pose = self.robot_pose
+            if pose is not None:
+                break
             time.sleep(0.05)
-        if self.robot_pose is None:
+
+        if pose is None:
             self.get_logger().error('No odometry received, aborting')
             goal_handle.abort()
             return FollowTrajectory.Result()
 
         self.get_logger().info(
-            f'Start: x={self.robot_pose[0]:.2f} '
-            f'y={self.robot_pose[1]:.2f} '
-            f'θ={np.degrees(self.robot_pose[2]):.1f}°'
+            f'Start: x={pose[0]:.2f} y={pose[1]:.2f} θ={np.degrees(pose[2]):.1f}°'
         )
 
         waypoints           = [(wp.x, wp.y) for wp in goal_handle.request.waypoints]
@@ -223,10 +231,12 @@ class FollowTrajectoryActionServer(Node):
             elapsed        = time.time() - start_time
             remaining_time = max(total_time - elapsed, 5.0)
 
-            # Capture snapshot once, e-stop and replan use identical data
+            # Capture pose and snapshot atomically once per cycle
+            with self._pose_lock:
+                pose = self.robot_pose
             snap = self.replanner.get_snapshot()
 
-            # ── Emergency stop - does NOT skip replan ──────────────────────
+            # ── Emergency stop ─────────────────────────────────────────────
             if self.replanner.emergency_stop_needed(snap):
                 self.cmd_vel_pub.publish(Twist())
                 if not _estop_logged:
@@ -240,9 +250,7 @@ class FollowTrajectoryActionServer(Node):
                 trajectory,
                 original_trajectory,
                 pp._current_idx,
-                self.robot_pose[0],
-                self.robot_pose[1],
-                self.robot_pose[2],
+                pose[0], pose[1], pose[2],
                 max_vel,
                 remaining_time,
                 snap=snap,
@@ -258,20 +266,20 @@ class FollowTrajectoryActionServer(Node):
 
             # ── Velocity — suppressed during e-stop ───────────────────────
             if not self.replanner.emergency_stop_needed(snap):
-                self.cmd_vel_pub.publish(pp.compute_cmd(*self.robot_pose))
+                self.cmd_vel_pub.publish(pp.compute_cmd(*pose))
 
             # ── Feedback ───────────────────────────────────────────────────
             dist_to_goal = float(np.linalg.norm(
-                np.array(final_goal) - np.array(self.robot_pose[:2])
+                np.array(final_goal) - np.array(pose[:2])
             ))
             feedback_msg.progress_pct = float(
-                np.clip((elapsed / total_time) * 100.0, 0.0, 100.0)
+                np.clip(pp._current_idx / max(len(trajectory) - 1, 1) * 100.0, 0.0, 100.0)
             )
             feedback_msg.status = String(data=(
                 f'dist={dist_to_goal:.2f}m | '
                 f'idx={pp._current_idx}/{len(trajectory)} | '
                 f't={elapsed:.1f}s | '
-                f'state={self.replanner._state}'
+                f'state={self.replanner.get_state()}'
             ))
             goal_handle.publish_feedback(feedback_msg)
 
@@ -281,9 +289,7 @@ class FollowTrajectoryActionServer(Node):
                 break
 
             if pp._current_idx >= len(trajectory) - 3 and dist_to_goal < tolerance * 3:
-                self.get_logger().info(
-                    f'Close enough at path end: error={dist_to_goal:.3f}m'
-                )
+                self.get_logger().info(f'Close enough at path end: error={dist_to_goal:.3f}m')
                 break
 
             if elapsed > total_time:
@@ -294,18 +300,16 @@ class FollowTrajectoryActionServer(Node):
 
         # ── Shutdown ───────────────────────────────────────────────────────
         self.cmd_vel_pub.publish(Twist())
-        elapsed      = time.time() - start_time
-        dist_to_goal = float(np.linalg.norm(
-            np.array(final_goal) - np.array(self.robot_pose[:2])
-        ))
+        elapsed = time.time() - start_time
+        with self._pose_lock:
+            pose = self.robot_pose
+        dist_to_goal          = float(np.linalg.norm(np.array(final_goal) - np.array(pose[:2])))
         result.success        = dist_to_goal < tolerance
         result.final_error    = dist_to_goal
         result.execution_time = float(elapsed)
         goal_handle.succeed()
         self.get_logger().info(
-            f'Result: success={result.success} | '
-            f'error={result.final_error:.3f}m | '
-            f'time={elapsed:.1f}s'
+            f'Result: success={result.success} | error={result.final_error:.3f}m | time={elapsed:.1f}s'
         )
         return result
 

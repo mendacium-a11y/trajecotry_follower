@@ -58,7 +58,8 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
        {x: 0.0, y: 0.0, theta: 0.0},
        {x: 2.0, y: 1.0, theta: 0.0},
        {x: 4.0, y: 0.0, theta: 0.0},
-       {x: 6.0, y: 1.0, theta: 0.0}
+       {x: 6.0, y: 1.0, theta: 0.0},
+       {x: 8.0, y: 0.0, theta: 0.0}
      ]}"
    ```
    > Note: Only the `x` and `y` fields are used. `theta` is accepted by the message type but ignored — heading is derived from the path direction.
@@ -74,8 +75,19 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
 colcon test --packages-select trajectory_tracking
 colcon test-result --verbose
 ```
-42 tests covering path smoothing output shape and edge cases, trajectory generation timing properties, Pure Pursuit velocity limits and steering direction, and the replanner state machine transitions and cooldown logic.
+47 tests covering path smoothing output shape and edge cases, trajectory generation timing properties, Pure Pursuit velocity limits and steering direction, replanner 
+state machine transitions and cooldown logic, and full pipeline integration.
 
+**Simulation Results (offline kinematic simulation):**
+The controller was validated offline over a sinusoidal 8-metre waypoint path at 0.3 m/s:
+- Mean cross-track error: **0.025m** (2.5cm)
+- Max cross-track error: **0.184m** at sharpest curve apex
+- 87.5% of timesteps within 5cm of planned path
+- Final goal error: **0.099m** (within 0.25m tolerance)
+
+To reproduce: `python3 scripts/plot.py` (from workspace root with `source install/setup.bash`)
+
+![plot](tracking_performance.png)
 ---
 
 ## Design Choices and Architecture
@@ -98,6 +110,8 @@ The system is modular, split into specialized Python modules orchestrated by the
 - **Why:** Computes steering commands by chasing a lookahead point ahead of the robot on the path rather than enforcing strict timestamp following. This makes it naturally robust to odometry drift and control lag — if the robot falls behind, it simply looks further ahead on the path and corrects. A PID controller on cross-track error would accumulate integral windup under the same conditions.
 - **Lookahead tuning:** Shorter lookahead = tighter path tracking but higher oscillation risk. Longer = smoother driving but cuts corners on tight curves. Default `0.5m` is a good balance for TurtleBot 4 at `0.3 m/s`.
 - **Near-goal behavior:** When no lookahead point is found ahead (robot is near the end), the controller steers directly toward the final point at reduced speed proportional to remaining distance for a smooth stop.
+
+- **Note:**Pure Pursuit is a geometric controller by design — it tracks a spatial path via lookahead, not a time-indexed reference. The trapezoidal timestamps are retained in the tuple for external monitoring and cross-track error computation. A time-indexed controller like PID requires tight timing synchronization and accumulates integral windup under execution delays; Pure Pursuit's spatial lookahead is inherently robust to those same delay
 
 ### 4. Action Server Architecture (`follow_trajectory_action_server.py`)
 - **Action Server paradigm:** Allows any client to track progress (`progress_pct`, distance to goal) and cancel mid-flight without killing the node.

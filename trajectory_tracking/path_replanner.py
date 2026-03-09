@@ -295,6 +295,9 @@ class PathReplanner:
 
     def get_snapshot(self):
         return self._snapshot
+    def get_state(self) -> str:
+        return self._state
+
 
 
     # ── Internal: geometry ─────────────────────────────────────────────────
