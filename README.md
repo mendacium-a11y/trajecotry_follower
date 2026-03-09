@@ -196,5 +196,5 @@ Watch `/replanned_trajectory` appear in RViz as the robot detects the box and co
 ---
 
 ## AI Tools Used
-- **Perplexity / Claude 3.5 Sonnet:** Used for debugging and algorithmic consultation. Specifically, diagnosing string-tension math issues when B-splines were oscillating near closely packed bypass points, and architecting the two-state `BYPASSING` machine when the initial timer-based cooldown logic failed.
+- **Perplexity + Claude 4.6 Sonnet:** Used for debugging and algorithmic consultation. Specifically, diagnosing string-tension math issues when B-splines were oscillating near closely packed bypass points, and architecting the two-state `BYPASSING` machine when the initial timer-based cooldown logic failed.
 - **Google Antigravity:** Handled boilerplate Python/ROS 2 generation, typing help, and inline code refactoring to keep the workflow moving quickly. All core logic choices (Pure Pursuit, trapezoids, splines) were driven by me, using AI only as a proxy for writing code.
