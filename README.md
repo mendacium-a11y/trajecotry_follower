@@ -1,6 +1,6 @@
 # Trajectory Tracking & Path Smoothing for Differential Drive Robots
 
-This repository contains a ROS 2 package implementing a Path Smoothing and Trajectory Tracking action server for a differential drive robot (TurtleBot 4). It accepts discrete 2D waypoints, generates a smooth time-parameterized trajectory avoiding sudden sharp turns, and tracks it using a Pure Pursuit controller. 
+This ROS 2 package provides a Path Smoothing and Trajectory Tracking action server for the TurtleBot 4. You give it discrete 2D waypoints, and it generates a smooth time-parameterized trajectory and tracks it using a Pure Pursuit controller. It also includes dynamic obstacle avoidance.
 
 ## Table of Contents
 1. [Setup and Execution](#setup-and-execution)
@@ -34,6 +34,7 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
    colcon build --packages-select trajectory_tracking
    source install/setup.bash
    ```
+ Note: A custom [world](worlds/plain.world) was used to test all of this out, 
 
 ### Execution
 
@@ -59,7 +60,11 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
        {x: 2.0, y: 1.0, theta: 0.0},
        {x: 4.0, y: 0.0, theta: 0.0},
        {x: 6.0, y: 1.0, theta: 0.0},
-       {x: 8.0, y: 0.0, theta: 0.0}
+       {x: 8.0, y: 0.0, theta: 0.0},
+       {x: 7.0, y: 3.0, theta: 0.0},
+       {x: 6.0, y: 2.0, theta: 0.0},
+       {x: 4.0, y: 3.0, theta: 0.0},
+       {x: 3.0, y: 2.0, theta: 0.0},
      ]}"
    ```
    > Note: Only the `x` and `y` fields are used. `theta` is accepted by the message type but ignored — heading is derived from the path direction.
@@ -75,11 +80,10 @@ This repository contains a ROS 2 package implementing a Path Smoothing and Traje
 colcon test --packages-select trajectory_tracking
 colcon test-result --verbose
 ```
-47 tests covering path smoothing output shape and edge cases, trajectory generation timing properties, Pure Pursuit velocity limits and steering direction, replanner 
-state machine transitions and cooldown logic, and full pipeline integration.
+47 tests cover path smoothing, timing limits, controller outputs, and the replanner state machine.
 
-**Simulation Results (offline kinematic simulation):**
-The controller was validated offline over a sinusoidal 8-metre waypoint path at 0.3 m/s:
+**Results:**
+Tested offline over an 8-metre sinusoidal path at 0.3 m/s:
 - Mean cross-track error: **0.025m** (2.5cm)
 - Max cross-track error: **0.184m** at sharpest curve apex
 - 87.5% of timesteps within 5cm of planned path
@@ -92,31 +96,28 @@ To reproduce: `python3 scripts/plot.py` (from workspace root with `source instal
 
 ## Design Choices and Architecture
 
-The system is modular, split into specialized Python modules orchestrated by the main Action Server.
+The code is broken into specific Python modules that don't depend on ROS, making them easy to unit test. The main Action Server stitches them together.
 
 ### 1. Path Smoothing (`path_smoother.py`)
-- **Algorithm:** B-Spline interpolation via `scipy.interpolate.splprep`
-- **Why:** Discrete waypoints contain sharp corners that force a differential drive robot to decelerate or stop to turn in place. B-Splines guarantee C² continuity (smooth curvature), allowing the robot to maintain translational velocity through curves.
-- **Key detail:** Uses `s = n * 0.01` (adaptive smoothing factor) rather than `s=0.0` (exact interpolation). Exact interpolation causes Runge-style oscillations when waypoints are closely spaced — which happens every time the replanner injects bypass waypoints that can be under 0.5m apart. Duplicate and densely clustered points are filtered out before fitting.
-- **Fallback:** Linear interpolation when fewer than 4 unique points remain after deduplication.
+- **Algorithm:** B-Spline interpolation (`scipy.interpolate.splprep`).
+- **Why:** Pure waypoints have sharp corners, making the robot stop and turn. B-Splines create a smoothed C² curve so the robot can stay moving.
+- **Details:** Uses an adaptive smoothing factor (`s = n * 0.01`) instead of exact interpolation (`s=0.0`). Exact interpolation tends to cause huge oscillations if waypoints are placed very close together (like when the replanner drops bypass points). Fast duplicate point filtering runs before splining. Falls back to linear interpolation if you pass less than 4 points.
 
 ### 2. Trajectory Generation (`trajectory_generator.py`)
-- **Algorithm:** Trapezoidal velocity profile mapping arc-length distances to timestamps
-- **Why:** Provides a realistic kinematic profile — bounded acceleration and deceleration — so wheel motors are not commanded to instantaneously jump to full speed. Given `total_time` and `max_vel`, it computes optimal acceleration, cruise, and deceleration phases. The output `[(x, y, t), ...]` gives the Pure Pursuit controller a time-reference to measure progress against.
-- **Short path handling:** If the path is too short to reach `max_vel`, the profile degrades gracefully to a pure triangular (accel/decel only) profile.
+- **Algorithm:** Trapezoidal velocity profile.
+- **Why:** Maps distances on the smooth path to actual timestamps, so the wheels aren't commanded to jerk to full speed instantly. It calculates an acceleration phase, a constant cruise phase (`max_vel`), and a deceleration phase matching the `total_time` parameter.
+- **Short paths:** If the path is too short to hit `max_vel`, it steps down to a triangular profile (accel directly into decel).
 
 ### 3. Trajectory Tracking Controller (`pure_pursuit.py`)
-- **Algorithm:** Pure Pursuit
-- **Why:** Computes steering commands by chasing a lookahead point ahead of the robot on the path rather than enforcing strict timestamp following. This makes it naturally robust to odometry drift and control lag — if the robot falls behind, it simply looks further ahead on the path and corrects. A PID controller on cross-track error would accumulate integral windup under the same conditions.
-- **Lookahead tuning:** Shorter lookahead = tighter path tracking but higher oscillation risk. Longer = smoother driving but cuts corners on tight curves. Default `0.5m` is a good balance for TurtleBot 4 at `0.3 m/s`.
-- **Near-goal behavior:** When no lookahead point is found ahead (robot is near the end), the controller steers directly toward the final point at reduced speed proportional to remaining distance for a smooth stop.
-
-- **Note:**Pure Pursuit is a geometric controller by design — it tracks a spatial path via lookahead, not a time-indexed reference. The trapezoidal timestamps are retained in the tuple for external monitoring and cross-track error computation. A time-indexed controller like PID requires tight timing synchronization and accumulates integral windup under execution delays; Pure Pursuit's spatial lookahead is inherently robust to those same delay
+- **Algorithm:** Pure Pursuit with Time-Parameterized Velocities.
+- **Why:** Pure pursuit steers by chasing a spatial point ahead of the robot. This handles odometry drift well — if the robot gets delayed, it just looks further down the curve instead of winding up a PID integral error. But to make sure it obeys our trapezoidal plan, the linear velocity is now read directly from the timestamps of the current path segment.
+- **Lookahead:** Currently set to `0.5m`. Shorter means tighter tracking but more wobbling; longer is smoother but cuts corners.
+- **Stopping:** When the lookahead point runs off the end of the path, it steers straight for the goal and dials down the speed proportionally to the remaining distance.
 
 ### 4. Action Server Architecture (`follow_trajectory_action_server.py`)
-- **Action Server paradigm:** Allows any client to track progress (`progress_pct`, distance to goal) and cancel mid-flight without killing the node.
-- **Concurrency:** Uses `MultiThreadedExecutor` with `ReentrantCallbackGroup` so `/odom` and `/scan` callbacks are processed concurrently without blocking the 20Hz control loop.
-- **Snapshot pattern:** The scan and robot pose are captured atomically once per control cycle and passed to both `emergency_stop_needed()` and `replan()`, guaranteeing both checks operate on identical sensor data within a single cycle.
+- **Setup:** A ROS 2 Action Server allows sending large waypoint arrays, tracking progress percentages, and cancelling goals properly.
+- **Concurrency:** Uses `MultiThreadedExecutor`. This prevents the 20Hz control loop from getting blocked by `/odom` or `/scan` callbacks.
+- **Locking:** `/scan` and `/odom` data are locked and captured simultaneously at the top of every loop iteration so the math uses matching sensor timelines.
 
 ---
 
@@ -124,24 +125,10 @@ The system is modular, split into specialized Python modules orchestrated by the
 
 Transitioning from TurtleBot 4 simulation to a physical differential-drive robot requires addressing several real-world imperfections:
 
-1. **Odometry Drift:**
-   Simulation `/odom` is near-perfect. On a real robot, wheel slip and encoder noise accumulate drift rapidly.
-   **Solution:** Run a localization stack — AMCL with a pre-built map, or an EKF fusing IMU and wheel encoders (e.g., `robot_localization` package). The Pure Pursuit controller works over any reliable pose source as long as TF frames are consistent.
-
-2. **Actuator Limits and Control Lag:**
-   Real motors have inertia and cannot track instantaneous velocity step changes.
-   **Solution:** Pass `/cmd_vel` through a velocity smoother node that enforces physical jerk limits before commands reach the hardware driver.
-
-3. **LiDAR Noise and False Positives:**
-   Real lidar has range noise, scan shadows, and reflective surface artifacts that can trigger false replans.
-   **Solution:** Apply a median filter over scan ranges before passing to the replanner, and increase `corridor_half_width` slightly to avoid triggering on single noisy returns.
-
-4. **Communication and Hardware Watchdog:**
-   If `/odom` drops (cable fault, node crash), the robot will continue on stale pose data.
-   **Solution:** Add a watchdog timer on the odom callback — if no odometry is received for more than 200ms, publish a zero `Twist` and abort the goal.
-
-5. **Global vs. Local Frame:**
-   The current planner assumes all waypoints are in the `odom` frame. On a real robot with a map, waypoints should be given in the `map` frame and transformed to `odom` via TF before planning.
+1. **Odometry Drift:** Wheel slip ruins `/odom` quickly. You'll need to feed the controller a fused pose from an EKF or an AMCL localization map instead of raw wheel data.
+2. **Control Lag:** Real motors can't handle instant velocity jumps. The `/cmd_vel` output should be piped through a velocity smoother node to enforce strict physical jerk limits.
+3. **LiDAR Noise:** Real lidars get ghost reflections. Putting a median filter on the scan ranges and widening the `corridor_half_width` parameter will stop the replanner from panicking over noise.
+4. **TF Frames:** Right now, the code assumes waypoints are given in the `odom` frame. On a real mapped robot, you'd give waypoints in the `map` frame, and the controller needs a TF listener to transform everything into `base_link` local coordinates dynamically.
 
 ---
 
@@ -152,31 +139,21 @@ The system dynamically bypasses unexpected obstacles at runtime using a geometri
 ### How It Works
 
 **1. State Machine**
-
-The replanner operates as a two-state machine:
-- `NORMAL` — monitoring the path corridor for obstacles
-- `BYPASSING` — executing a computed bypass; new replans are blocked until the bypass completes
-
-This prevents the oscillation that occurs when the replanner repeatedly re-triggers mid-bypass because the obstacle is still visible in the scan.
+It uses two states: `NORMAL` (watching for obstacles) and `BYPASSING` (executing a detour). Blocking new replans while `BYPASSING` stops the robot from oscillating back and forth as the laser scan hits different parts of the same obstacle.
 
 **2. Corridor Detection**
+Every cycle, it checks a "corridor" stretching down the upcoming path. If lidar points hit inside that width, it sets a block. It uses the closest contact point (not the mean) so nearby walls don't warp the obstacle location.
 
-Each control cycle, scan points are projected into world frame using the pose captured atomically with the scan. Points within `corridor_half_width` of any upcoming path segment (within `lookahead_check` metres) are flagged as blocking. The closest blocking point is used as the obstacle estimate — not the mean — to avoid wall returns pulling the estimate away from the actual obstacle.
+**3. The Bypass Math**
+- It casts a perpendicular ray out from the obstacle to find free space on the left or right.
+- It drops two bypass waypoints (WP1 before the obstacle, WP2 past it).
+- It checks that both points and the line between them are clear. (If it hits a wall on the left, it flips to try the right side).
 
-**3. Geometric Bypass Generation**
-
-- A ray is cast perpendicular to the path direction from the obstacle centre to measure free space on each side
-- Two bypass waypoints (WP1, WP2) are placed laterally offset from the obstacle — WP1 before it, WP2 after
-- All three are validated: WP1 free, WP2 free, and the segment WP1→WP2 clear of obstacles
-- If the preferred side is blocked, the algorithm automatically flips to the other side
-
-**4. Trajectory Hot-Swap**
-
-The new waypoint list `[robot_position, WP1, WP2, ...original_path_from_resume_idx]` is fed back through the B-Spline smoother and trapezoidal generator. The Pure Pursuit controller's trajectory is replaced in-flight without stopping, producing a fluid dodge manoeuvre.
+**4. Hot-Swapping the Path**
+It takes `[robot_pos, WP1, WP2, ...rest_of_original_path]`, runs it through the B-spline and profile generator again, and swaps the array inside the active Pure Pursuit controller. The robot smoothly veers around without stopping.
 
 **5. Emergency Stop**
-
-If an obstacle enters the forward arc within `stop_distance` (0.35m), the robot halts immediately. Critically, the replanner still runs during the stop so a bypass is computed while the robot is stationary — the robot resumes motion as soon as a clear path is ready.
+If an obstacle drops right in front of the robot (inside 0.35m `stop_distance`), it triggers an E-stop. The replanner loop keeps running while stopped, so the moment a clear bypass is found (or the obstacle moves), movement resumes.
 
 ### Testing Obstacle Avoidance
 
@@ -218,10 +195,5 @@ Watch `/replanned_trajectory` appear in RViz as the robot detects the box and co
 ---
 
 ## AI Tools Used
-
-This project used AI tooling throughout development:
-
-- **Perplexity (Claude Sonnet 4.6):** Used for implementation guidance throughout the project — designing the state machine architecture for the replanner after diagnosing that the original cooldown-timer approach was causing mid-bypass re-triggering and oscillation, debugging the spline oscillation issue caused by `s=0.0` in `splprep` when bypass waypoints are densely clustered, and identifying the adaptive `s = n * 0.01` fix. Also used for ROS 2 architecture decisions, bug diagnosis across the full pipeline, and test case design.
-- **Google Antigravity (AI-assisted coding):** Used for inline code generation, ROS 2 boilerplate scaffolding (publisher/subscriber setup, action server structure), and Python type hints.
-
-All algorithmic decisions — choice of Pure Pursuit over PID, trapezoidal profiling, B-Spline smoothing, geometric bypass approach — were made and understood by me. AI was used as a debugging and implementation accelerator, not a decision-maker.
+- **Perplexity / Claude 3.5 Sonnet:** Used for debugging and algorithmic consultation. Specifically, diagnosing string-tension math issues when B-splines were oscillating near closely packed bypass points, and architecting the two-state `BYPASSING` machine when the initial timer-based cooldown logic failed.
+- **Google Antigravity:** Handled boilerplate Python/ROS 2 generation, typing help, and inline code refactoring to keep the workflow moving quickly. All core logic choices (Pure Pursuit, trapezoids, splines) were driven by me, using AI only as a proxy for writing code.
